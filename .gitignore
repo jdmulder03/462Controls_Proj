@@ -1,0 +1,30 @@
+# Vendor (regenerated from .ioc)
+Drivers/
+Middlewares/
+
+# Build
+build/
+Debug/
+Release/
+cmake-build-*/
+
+# CubeIDE
+.settings/
+.cproject
+.project
+
+# CubeMX backups
+*.mxproject
+
+# Binaries
+*.o
+*.d
+*.elf
+*.bin
+*.hex
+*.map
+*.list
+
+# OS junk
+.DS_Store
+Thumbs.db
