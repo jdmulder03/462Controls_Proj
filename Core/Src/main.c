@@ -286,7 +286,7 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-MPU6050_RawDataTypeDef raw;
+volatile MPU6050_RawDataTypeDef raw;
 /* USER CODE END 4 */
 
 /* USER CODE BEGIN Header_StartDefaultTask */
@@ -310,8 +310,7 @@ void StartDefaultTask(void* argument)
     {
         HAL_GPIO_TogglePin(LED2_GPIO_PORT, LED2_PIN);
         MPU6050_ReadAll(&hi2c1, &raw);
-        osDelay(500);
-        printf("balls\n\r");
+        osDelay(10);
     }
     /* USER CODE END 5 */
 }
