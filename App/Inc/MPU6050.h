@@ -13,6 +13,8 @@
 #define MPU6050_CONFIG          0x1A
 #define MPU6050_GYRO_CONFIG     0x1B
 #define MPU6050_ACCEL_CONFIG    0x1C
+#define MPU6050_INT_PIN_CFG     0x37
+#define MPU6050_INT_ENABLE      0x38
 #define MPU6050_ACCEL_XOUT_H    0x3B  // start of the 14-byte sensor block
 #define MPU6050_SIG_PATH_RST    0x68
 #define MPU6050_PWR_MGMT_1      0x6B
@@ -53,6 +55,27 @@ typedef struct __attribute__((packed))
     uint8_t XA_ST : 1; // bit 7        X-axis self-test
 } MPU6050_AccelConfigTypeDef;
 
+typedef struct __attribute__((packed))
+{
+    uint8_t RESERVED : 1; // bit 0
+    uint8_t I2C_BYPASS_EN : 1; // bit 1   expose aux I2C bus to host
+    uint8_t FSYNC_INT_EN : 1; // bit 2    FSYNC pin as interrupt source
+    uint8_t FSYNC_INT_LEVEL : 1; // bit 3 FSYNC active low vs high
+    uint8_t INT_RD_CLEAR : 1; // bit 4    clear on any read vs status read
+    uint8_t LATCH_INT_EN : 1; // bit 5    latch until cleared vs 50us pulse
+    uint8_t INT_OPEN : 1; // bit 6        open-drain vs push-pull
+    uint8_t INT_LEVEL : 1; // bit 7       active low vs active high
+} MPU6050_IntPinCfgTypeDef;
+
+typedef struct __attribute__((packed))
+{
+    uint8_t DATA_RDY_EN : 1; // bit 0     new sensor sample available
+    uint8_t RESERVED1 : 2; // bits [2:1]
+    uint8_t I2C_MST_INT_EN : 1; // bit 3  aux I2C master status
+    uint8_t FIFO_OFLOW_EN : 1; // bit 4   FIFO overflow
+    uint8_t RESERVED2 : 3; // bits [7:5]
+} MPU6050_IntEnableTypeDef;
+
 typedef struct
 {
     int16_t x;
@@ -71,7 +94,10 @@ typedef struct
 #define MPU6050_RESET_TIMEOUT_MS 100
 
 HAL_StatusTypeDef MPU6050_Init(I2C_HandleTypeDef* hi2c);
+HAL_StatusTypeDef MPU6050_EnableInterrupt(I2C_HandleTypeDef* hi2c);
 HAL_StatusTypeDef MPU6050_ReadAll(I2C_HandleTypeDef* hi2c, MPU6050_RawDataTypeDef* out);
+HAL_StatusTypeDef MPU6050_ReadAll_DMA(I2C_HandleTypeDef* hi2c, MPU6050_RawDataTypeDef* out);
+void MPU6050_ProcessRaw(MPU6050_RawDataTypeDef* buf);
 
 
 #endif //ESET462PROJECT_MPU6050_H

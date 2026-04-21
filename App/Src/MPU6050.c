@@ -65,20 +65,24 @@ HAL_StatusTypeDef MPU6050_Init(I2C_HandleTypeDef* hi2c)
 
     HAL_Delay(100);
 
-    // Signal path reset
-    uint8_t sig_rst = 0x07;
-    status = MPU6050_WriteReg(hi2c, MPU6050_SIG_PATH_RST, &sig_rst, 1);
+    // Wake first — config writes (SMPLRT_DIV, DLPF, ranges) don't latch while SLEEP=1
+    pwr = (MPU6050_PwrMgmt1TypeDef){
+        .CLKSEL = 0x01,
+        .TEMP_DIS = 0,
+        .CYCLE = 0,
+        .SLEEP = 0,
+    };
+    status = MPU6050_WriteReg(hi2c, MPU6050_PWR_MGMT_1, (uint8_t*)&pwr, 1);
     if (status != HAL_OK) return status;
 
     HAL_Delay(100);
 
     // Sample rate divisor (Sample Rate = Gyroscope Output Rate / (1 + SMPLRT_DIV))
-    // Eventually read on interrupt potentially with DMA
     uint8_t smplrt_div = 0;
     status = MPU6050_WriteReg(hi2c, MPU6050_SMPLRT_DIV, &smplrt_div, 1);
     if (status != HAL_OK) return status;
 
-    // DLPF bandwidth (260 Hz — filter effectively disabled)
+    // DLPF bandwidth — DLPF_CFG=3 sets gyro output rate to 1kHz, 44Hz BW
     MPU6050_ConfigTypeDef cfg = {.DLPF_CFG = 0x03};
     status = MPU6050_WriteReg(hi2c, MPU6050_CONFIG, (uint8_t*)&cfg, 1);
     if (status != HAL_OK) return status;
@@ -93,35 +97,55 @@ HAL_StatusTypeDef MPU6050_Init(I2C_HandleTypeDef* hi2c)
     status = MPU6050_WriteReg(hi2c, MPU6050_ACCEL_CONFIG, (uint8_t*)&accel_cfg, 1);
     if (status != HAL_OK) return status;
 
-    // Clock source: PLL with gyro X reference, wake from sleep
-    pwr = (MPU6050_PwrMgmt1TypeDef){
-        .CLKSEL = 0x01,
-        .TEMP_DIS = 0,
-        .CYCLE = 0,
-        .SLEEP = 0,
+    return HAL_OK;
+}
+
+HAL_StatusTypeDef MPU6050_EnableInterrupt(I2C_HandleTypeDef* hi2c)
+{
+    HAL_StatusTypeDef status;
+
+    // Matches EXTI9_5 on PC9 configured rising-edge, no pull.
+    // Originally wanted to do push-pull but MPU6050 has verified and known ringing issues
+    // Active-high, 50us pulse, no latch
+    MPU6050_IntPinCfgTypeDef pin_cfg = {
+        .LATCH_INT_EN = 0,
+        .INT_RD_CLEAR = 0,
+        .INT_LEVEL = 1,
     };
-    status = MPU6050_WriteReg(hi2c, MPU6050_PWR_MGMT_1, (uint8_t*)&pwr, 1);
+    status = MPU6050_WriteReg(hi2c, MPU6050_INT_PIN_CFG, (uint8_t*)&pin_cfg, 1);
     if (status != HAL_OK) return status;
 
-    HAL_Delay(100);
+    // Fire INT pin on each new sensor sample
+    MPU6050_IntEnableTypeDef int_en = {.DATA_RDY_EN = 1};
+    status = MPU6050_WriteReg(hi2c, MPU6050_INT_ENABLE, (uint8_t*)&int_en, 1);
+    if (status != HAL_OK) return status;
 
     return HAL_OK;
 }
 
+void MPU6050_ProcessRaw(MPU6050_RawDataTypeDef* buf)
+{
+    // Sensor is big-endian; swap each int16 in place
+    buf->accel.x = (int16_t)__builtin_bswap16(buf->accel.x);
+    buf->accel.y = (int16_t)__builtin_bswap16(buf->accel.y);
+    buf->accel.z = (int16_t)__builtin_bswap16(buf->accel.z);
+    buf->temp    = (int16_t)__builtin_bswap16(buf->temp);
+    buf->gyro.x  = (int16_t)__builtin_bswap16(buf->gyro.x);
+    buf->gyro.y  = (int16_t)__builtin_bswap16(buf->gyro.y);
+    buf->gyro.z  = (int16_t)__builtin_bswap16(buf->gyro.z);
+}
+
 HAL_StatusTypeDef MPU6050_ReadAll(I2C_HandleTypeDef* hi2c, MPU6050_RawDataTypeDef* out)
 {
-    MPU6050_RawDataTypeDef tmp;
     HAL_StatusTypeDef status = MPU6050_ReadReg(hi2c, MPU6050_ACCEL_XOUT_H,
-                                               (uint8_t*)&tmp, sizeof(tmp));
+                                               (uint8_t*)out, sizeof(*out));
     if (status != HAL_OK) return status;
-    // Sensor is big-endian; swap each int16 into caller's buffer
-    out->accel.x = (int16_t)__builtin_bswap16(tmp.accel.x);
-    out->accel.y = (int16_t)__builtin_bswap16(tmp.accel.y);
-    out->accel.z = (int16_t)__builtin_bswap16(tmp.accel.z);
-    out->temp = (int16_t)__builtin_bswap16(tmp.temp);
-    out->gyro.x = (int16_t)__builtin_bswap16(tmp.gyro.x);
-    out->gyro.y = (int16_t)__builtin_bswap16(tmp.gyro.y);
-    out->gyro.z = (int16_t)__builtin_bswap16(tmp.gyro.z);
-
+    MPU6050_ProcessRaw(out);
     return HAL_OK;
+}
+
+HAL_StatusTypeDef MPU6050_ReadAll_DMA(I2C_HandleTypeDef* hi2c, MPU6050_RawDataTypeDef* out)
+{
+    return HAL_I2C_Mem_Read_DMA(hi2c, MPU6050_ADDR << 1, MPU6050_ACCEL_XOUT_H,
+                                I2C_MEMADD_SIZE_8BIT, (uint8_t*)out, sizeof(*out));
 }
