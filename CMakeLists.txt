@@ -46,6 +46,7 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
     App/Src/MPU6050.c
+    App/Src/controls.c
 )
 
 # Add include paths

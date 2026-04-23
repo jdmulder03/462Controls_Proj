@@ -4,7 +4,13 @@
 
 #include "MPU6050.h"
 
-//Add DMA + Interrupt pin signal chain will be cool
+static I2C_HandleTypeDef* s_hi2c;
+
+MPU6050_RawDataTypeDef raw;
+volatile uint32_t mpu_int_count = 0;
+volatile uint32_t mpu_dma_done_count = 0;
+volatile uint32_t mpu_dma_err_count = 0;
+volatile uint8_t  mpu_dma_busy = 0;
 
 static HAL_StatusTypeDef MPU6050_ReadReg(I2C_HandleTypeDef* hi2c,
                                          uint8_t reg,
@@ -78,6 +84,7 @@ HAL_StatusTypeDef MPU6050_Init(I2C_HandleTypeDef* hi2c)
     HAL_Delay(100);
 
     // Sample rate divisor (Sample Rate = Gyroscope Output Rate / (1 + SMPLRT_DIV))
+    // 1 kHz / (1 + 1) = 500 Hz
     uint8_t smplrt_div = 0;
     status = MPU6050_WriteReg(hi2c, MPU6050_SMPLRT_DIV, &smplrt_div, 1);
     if (status != HAL_OK) return status;
@@ -103,6 +110,9 @@ HAL_StatusTypeDef MPU6050_Init(I2C_HandleTypeDef* hi2c)
 HAL_StatusTypeDef MPU6050_EnableInterrupt(I2C_HandleTypeDef* hi2c)
 {
     HAL_StatusTypeDef status;
+
+    // Cache handle so the EXTI ISR can kick off DMA without plumbing it through
+    s_hi2c = hi2c;
 
     // Matches EXTI9_5 on PC9 configured rising-edge, no pull.
     // Originally wanted to do push-pull but MPU6050 has verified and known ringing issues
@@ -148,4 +158,40 @@ HAL_StatusTypeDef MPU6050_ReadAll_DMA(I2C_HandleTypeDef* hi2c, MPU6050_RawDataTy
 {
     return HAL_I2C_Mem_Read_DMA(hi2c, MPU6050_ADDR << 1, MPU6050_ACCEL_XOUT_H,
                                 I2C_MEMADD_SIZE_8BIT, (uint8_t*)out, sizeof(*out));
+}
+
+/* Weak default — consumers (e.g. control task) override to be notified per sample. */
+__attribute__((weak)) void MPU6050_OnSample(void) { }
+
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+    if (GPIO_Pin != GPIO_PIN_9) return;
+    mpu_int_count++;
+    if (mpu_dma_busy) return;                    // drop sample if previous DMA still in flight
+    mpu_dma_busy = 1;
+    if (MPU6050_ReadAll_DMA(s_hi2c, &raw) != HAL_OK) {
+        mpu_dma_busy = 0;
+        mpu_dma_err_count++;
+    }
+}
+
+void HAL_I2C_MemRxCpltCallback(I2C_HandleTypeDef *hi2c)
+{
+    if (hi2c != s_hi2c) return;
+    MPU6050_ProcessRaw(&raw);
+    mpu_dma_done_count++;
+    mpu_dma_busy = 0;
+    MPU6050_OnSample();
+}
+
+void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *hi2c)
+{
+    if (hi2c != s_hi2c) return;
+    mpu_dma_err_count++;
+    /* Bus-error recovery: a NACK/BERR/ARLO leaves the peripheral wedged,
+     * so every subsequent DMA kick returns HAL_BUSY forever. Tear it down
+     * and bring it back up so the next DRDY pulse can restart cleanly. */
+    HAL_I2C_DeInit(hi2c);
+    HAL_I2C_Init(hi2c);
+    mpu_dma_busy = 0;
 }

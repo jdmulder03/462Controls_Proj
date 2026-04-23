@@ -99,5 +99,15 @@ HAL_StatusTypeDef MPU6050_ReadAll(I2C_HandleTypeDef* hi2c, MPU6050_RawDataTypeDe
 HAL_StatusTypeDef MPU6050_ReadAll_DMA(I2C_HandleTypeDef* hi2c, MPU6050_RawDataTypeDef* out);
 void MPU6050_ProcessRaw(MPU6050_RawDataTypeDef* buf);
 
+/* Latest sample, refreshed by the EXTI->DMA chain owned by this module. */
+extern MPU6050_RawDataTypeDef raw;
+extern volatile uint32_t mpu_int_count;
+extern volatile uint32_t mpu_dma_done_count;
+extern volatile uint32_t mpu_dma_err_count;
+extern volatile uint8_t  mpu_dma_busy;
+
+/* __weak hook; override to consume each fresh sample from DMA-complete ISR context. */
+void MPU6050_OnSample(void);
+
 
 #endif //ESET462PROJECT_MPU6050_H

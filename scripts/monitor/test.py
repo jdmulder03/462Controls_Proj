@@ -13,6 +13,7 @@ Usage:
     uv run python test.py --plot-mpu                # live plot of `raw` (accel+gyro)
     uv run python test.py --plot-pitch              # live plot of complementary filter
     uv run python test.py --plot-all                # MPU raw + pitch in one figure
+    uv run python test.py --plot-control            # pitch+target+e (rad), u (N), duty (us)
 """
 
 import argparse
@@ -169,10 +170,10 @@ def run_pitch_plot(target, addr_filt, addr_acc, rate, window_s):
 
     fig, ax = plt.subplots(figsize=(10, 4))
     fig.suptitle("Complementary filter (SWD live)")
-    ax.set_ylabel("pitch (deg)")
+    ax.set_ylabel("pitch (rad)")
     ax.set_xlabel("t (s)")
-    (l_filt,) = ax.plot([], [], label="pitch_deg (fused)")
-    (l_acc,) = ax.plot([], [], label="pitch_acc_deg (accel only)", alpha=0.5)
+    (l_filt,) = ax.plot([], [], label="pitch_rad (fused)")
+    (l_acc,) = ax.plot([], [], label="pitch_acc_rad (accel only)", alpha=0.5)
     ax.legend(loc="upper right")
     ax.grid(True)
 
@@ -199,6 +200,129 @@ def run_pitch_plot(target, addr_filt, addr_acc, rate, window_s):
     plt.show()
 
 
+def run_control_plot(target, addrs, rate, window_s):
+    """Tuning dashboard: angle tracking, pitch rate, u decomposition, actuator.
+
+    addrs is a dict with: pitch, target, acc, rate_, e, u_ff, u_pd, u, duty,
+                          kp, kd, ff_gain
+    """
+    import math
+    import matplotlib.pyplot as plt
+    from matplotlib.animation import FuncAnimation
+
+    maxlen = max(int(rate * window_s), 10)
+    bufs = {k: deque(maxlen=maxlen) for k in
+            ("t", "pitch", "target", "acc", "rate_", "e", "u_ff", "u_pd", "u", "duty")}
+
+    fig, (ax_ang, ax_rate, ax_u, ax_d) = plt.subplots(
+        4, 1, sharex=True, figsize=(11, 10),
+        gridspec_kw={"height_ratios": [1.3, 1.0, 1.3, 1.0]})
+    fig.suptitle("PD + gravity feedforward (SWD live)")
+
+    ax_ang.set_ylabel("angle (rad)")
+    ax_rate.set_ylabel("rate (rad/s)")
+    ax_u.set_ylabel("thrust (N)")
+    ax_d.set_ylabel("duty (us)")
+    ax_d.set_xlabel("t (s)")
+
+    (l_pitch,)  = ax_ang.plot([], [], label="pitch", color="tab:blue", lw=1.6)
+    (l_target,) = ax_ang.plot([], [], label="target", color="black", ls="--", lw=1.2)
+    (l_acc,)    = ax_ang.plot([], [], label="accel-only", color="tab:gray", alpha=0.5, lw=1.0)
+    (l_e,)      = ax_ang.plot([], [], label="error", color="tab:orange", alpha=0.8, lw=1.0)
+
+    (l_rate,) = ax_rate.plot([], [], label="pitch_rate", color="tab:purple", lw=1.2)
+    ax_rate.axhline(0, color="black", lw=0.5, alpha=0.5)
+
+    (l_uff,) = ax_u.plot([], [], label="u_ff (gravity)", color="tab:green", lw=1.3)
+    (l_upd,) = ax_u.plot([], [], label="u_pd (PD)", color="tab:orange", lw=1.3)
+    (l_u,)   = ax_u.plot([], [], label="u_total", color="tab:red", lw=1.6)
+    ax_u.axhline(0, color="black", lw=0.5, alpha=0.5)
+
+    (l_duty,) = ax_d.plot([], [], label="duty_cmd", color="tab:green", lw=1.4)
+    ax_d.axhline(1000, color="red", lw=0.8, ls=":", alpha=0.6, label="min/max")
+    ax_d.axhline(2000, color="red", lw=0.8, ls=":", alpha=0.6)
+
+    for a in (ax_ang, ax_rate, ax_u, ax_d):
+        a.legend(loc="upper right", fontsize=9)
+        a.grid(True, alpha=0.3)
+
+    gain_txt = fig.text(0.01, 0.98, "", fontsize=9, family="monospace",
+                        verticalalignment="top")
+
+    t0 = time.time()
+
+    def f32(a):  # read float32
+        return struct.unpack("<f", bytes(target.read_memory_block8(a, 4)))[0]
+
+    def u32(a):
+        return struct.unpack("<I", bytes(target.read_memory_block8(a, 4)))[0]
+
+    def update(_frame):
+        try:
+            pitch  = f32(addrs["pitch"])
+            tgt    = f32(addrs["target"])
+            acc    = f32(addrs["acc"])
+            pr     = f32(addrs["rate_"])
+            e      = f32(addrs["e"])
+            u_ff   = f32(addrs["u_ff"])
+            u_pd   = f32(addrs["u_pd"])
+            u      = f32(addrs["u"])
+            duty   = u32(addrs["duty"])
+            kp     = f32(addrs["kp"])
+            kd     = f32(addrs["kd"])
+            ff_gn  = f32(addrs["ff_gain"])
+        except Exception as ex:
+            print(f"read error: {ex}", file=sys.stderr)
+            return []
+
+        bufs["t"].append(time.time() - t0)
+        bufs["pitch"].append(pitch)
+        bufs["target"].append(tgt)
+        bufs["acc"].append(acc)
+        bufs["rate_"].append(pr)
+        bufs["e"].append(e)
+        bufs["u_ff"].append(u_ff)
+        bufs["u_pd"].append(u_pd)
+        bufs["u"].append(u)
+        bufs["duty"].append(duty)
+
+        xs = list(bufs["t"])
+        l_pitch.set_data(xs,  list(bufs["pitch"]))
+        l_target.set_data(xs, list(bufs["target"]))
+        l_acc.set_data(xs,    list(bufs["acc"]))
+        l_e.set_data(xs,      list(bufs["e"]))
+        l_rate.set_data(xs,   list(bufs["rate_"]))
+        l_uff.set_data(xs,    list(bufs["u_ff"]))
+        l_upd.set_data(xs,    list(bufs["u_pd"]))
+        l_u.set_data(xs,      list(bufs["u"]))
+        l_duty.set_data(xs,   list(bufs["duty"]))
+
+        _autoscale(ax_ang,  xs, list(bufs["pitch"]) + list(bufs["target"])
+                                 + list(bufs["acc"]) + list(bufs["e"]),
+                   window_s, pad_min=0.1)
+        _autoscale(ax_rate, xs, list(bufs["rate_"]), window_s, pad_min=0.2)
+        _autoscale(ax_u,    xs, list(bufs["u_ff"]) + list(bufs["u_pd"])
+                                 + list(bufs["u"]),
+                   window_s, pad_min=0.2)
+        _autoscale(ax_d,    xs, list(bufs["duty"]) + [1000, 2000],
+                   window_s, pad_min=50)
+
+        # Live gain + state readout. Handy while you twiddle from the debugger.
+        gain_txt.set_text(
+            f"Kp={kp:6.3f} N/rad   Kd={kd:6.3f} N·s/rad   ff_gain={ff_gn:5.3f}\n"
+            f"target={math.degrees(tgt):+6.1f}°   pitch={math.degrees(pitch):+6.1f}°   "
+            f"e={math.degrees(e):+6.1f}°   ω={math.degrees(pr):+7.1f}°/s\n"
+            f"u_ff={u_ff:+5.3f}N  u_pd={u_pd:+5.3f}N  u={u:+5.3f}N   duty={duty} us"
+        )
+
+        return [l_pitch, l_target, l_acc, l_e, l_rate, l_uff, l_upd, l_u, l_duty, gain_txt]
+
+    interval_ms = max(int(1000 / rate), 10)
+    _anim = FuncAnimation(fig, update, interval=interval_ms, blit=False, cache_frame_data=False)
+    plt.tight_layout(rect=(0, 0, 1, 0.94))
+    plt.show()
+
+
 def run_all_plot(target, addr_mpu, addr_filt, addr_acc, rate, window_s):
     import matplotlib.pyplot as plt
     from matplotlib.animation import FuncAnimation
@@ -213,13 +337,13 @@ def run_all_plot(target, addr_mpu, addr_filt, addr_acc, rate, window_s):
     fig.suptitle("MPU6050 raw + pitch (SWD live)")
     ax_a.set_ylabel("accel (LSB)")
     ax_g.set_ylabel("gyro (LSB)")
-    ax_p.set_ylabel("pitch (deg)")
+    ax_p.set_ylabel("pitch (rad)")
     ax_p.set_xlabel("t (s)")
 
     accel_lines = [ax_a.plot([], [], label=MPU_LABELS[i])[0] for i in range(3)]
     gyro_lines = [ax_g.plot([], [], label=MPU_LABELS[i + 4])[0] for i in range(3)]
-    (l_filt,) = ax_p.plot([], [], label="pitch_deg (fused)")
-    (l_acc,) = ax_p.plot([], [], label="pitch_acc_deg (accel)", alpha=0.5)
+    (l_filt,) = ax_p.plot([], [], label="pitch_rad (fused)")
+    (l_acc,) = ax_p.plot([], [], label="pitch_acc_rad (accel)", alpha=0.5)
     for a in (ax_a, ax_g, ax_p):
         a.legend(loc="upper right")
         a.grid(True)
@@ -270,9 +394,11 @@ def main():
     ap.add_argument("--plot-mpu", action="store_true",
                     help="live-plot MPU6050_RawDataTypeDef global (default: 'raw')")
     ap.add_argument("--plot-pitch", action="store_true",
-                    help="live-plot pitch_deg vs pitch_acc_deg")
+                    help="live-plot pitch_rad vs pitch_acc_rad")
     ap.add_argument("--plot-all", action="store_true",
                     help="live-plot MPU raw + pitch in one figure")
+    ap.add_argument("--plot-control", action="store_true",
+                    help="live-plot pitch/target/e (rad), ctrl_u (N), duty_cmd (us)")
     ap.add_argument("--window", type=float, default=5.0, help="plot window seconds")
     ap.add_argument("--count", action="store_true",
                     help="poll mpu_int_count and print rate (Hz)")
@@ -317,11 +443,31 @@ def main():
         return
 
     if args.plot_pitch:
-        addr_filt, _ = require("pitch_deg")
-        addr_acc, _ = require("pitch_acc_deg")
-        print(f"plotting pitch_deg/pitch_acc_deg @ {args.rate} Hz")
+        addr_filt, _ = require("pitch_rad")
+        addr_acc, _ = require("pitch_acc_rad")
+        print(f"plotting pitch_rad/pitch_acc_rad @ {args.rate} Hz")
         with open_session(args.target) as s:
             run_pitch_plot(s.target, addr_filt, addr_acc, args.rate, args.window)
+        return
+
+    if args.plot_control:
+        addrs = {
+            "pitch":   require("pitch_rad")[0],
+            "target":  require("pitch_target_rad")[0],
+            "acc":     require("pitch_acc_rad")[0],
+            "rate_":   require("pitch_rate_rad_s")[0],
+            "e":       require("ctrl_e")[0],
+            "u_ff":    require("ctrl_u_ff")[0],
+            "u_pd":    require("ctrl_u_pd")[0],
+            "u":       require("ctrl_u")[0],
+            "duty":    require("duty_cmd")[0],
+            "kp":      require("ctrl_kp")[0],
+            "kd":      require("ctrl_kd")[0],
+            "ff_gain": require("ff_gain")[0],
+        }
+        print(f"plotting PD controller @ {args.rate} Hz")
+        with open_session(args.target) as s:
+            run_control_plot(s.target, addrs, args.rate, args.window)
         return
 
     if args.plot_all:
@@ -329,8 +475,8 @@ def main():
         addr_mpu, size = require(mpu_name)
         if size < MPU_NBYTES:
             print(f"warn: '{mpu_name}' is {size}B, expected >= {MPU_NBYTES}B", file=sys.stderr)
-        addr_filt, _ = require("pitch_deg")
-        addr_acc, _ = require("pitch_acc_deg")
+        addr_filt, _ = require("pitch_rad")
+        addr_acc, _ = require("pitch_acc_rad")
         print(f"plotting {mpu_name} + pitch @ {args.rate} Hz")
         with open_session(args.target) as s:
             run_all_plot(s.target, addr_mpu, addr_filt, addr_acc, args.rate, args.window)

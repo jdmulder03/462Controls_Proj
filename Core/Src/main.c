@@ -22,9 +22,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "MPU6050.h"
-#include <string.h>
-#include <math.h>
+#include "controls.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -58,13 +56,6 @@ const osThreadAttr_t defaultTask_attributes = {
   .stack_size = 128 * 4
 };
 /* USER CODE BEGIN PV */
-osThreadId_t controlTaskHandle;
-const osThreadAttr_t controlTask_attributes = {
-  .name = "controlTask",
-  .priority = (osPriority_t) osPriorityAboveNormal,
-  .stack_size = 128 * 4
-};
-#define CONTROL_SAMPLE_FLAG 0x01U
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -76,7 +67,6 @@ static void MX_TIM1_Init(void);
 void StartDefaultTask(void *argument);
 
 /* USER CODE BEGIN PFP */
-void StartControlTask(void *argument);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -117,8 +107,7 @@ int main(void)
   MX_I2C1_Init();
   MX_TIM1_Init();
   /* USER CODE BEGIN 2 */
-  MPU6050_Init(&hi2c1);
-  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
+  Controls_Init(&hi2c1, &htim1, TIM_CHANNEL_1);
   /* USER CODE END 2 */
 
   /* Init scheduler */
@@ -145,7 +134,7 @@ int main(void)
   defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
-  controlTaskHandle = osThreadNew(StartControlTask, NULL, &controlTask_attributes);
+  Controls_StartTask();
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
@@ -247,7 +236,7 @@ static void MX_I2C1_Init(void)
 
   /* USER CODE END I2C1_Init 1 */
   hi2c1.Instance = I2C1;
-  hi2c1.Init.Timing = 0x4052060F;
+  hi2c1.Init.Timing = 0x40621236;
   hi2c1.Init.OwnAddress1 = 0;
   hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
   hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
@@ -273,10 +262,6 @@ static void MX_I2C1_Init(void)
   {
     Error_Handler();
   }
-
-  /** I2C Fast mode Plus enable
-  */
-  HAL_I2CEx_EnableFastModePlus(I2C_FASTMODEPLUS_I2C1);
   /* USER CODE BEGIN I2C1_Init 2 */
 
   /* USER CODE END I2C1_Init 2 */
@@ -416,41 +401,6 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-MPU6050_RawDataTypeDef raw;
-volatile uint32_t mpu_int_count = 0;
-volatile uint32_t mpu_dma_done_count = 0;
-volatile uint32_t mpu_dma_err_count = 0;
-volatile uint8_t  mpu_dma_busy = 0;
-
-void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
-{
-    if (GPIO_Pin != GPIO_PIN_9) return;
-    mpu_int_count++;
-    if (mpu_dma_busy) return;                    // drop sample if previous DMA still in flight
-    mpu_dma_busy = 1;
-    if (MPU6050_ReadAll_DMA(&hi2c1, &raw) != HAL_OK) {
-        mpu_dma_busy = 0;
-        mpu_dma_err_count++;
-    }
-}
-
-void HAL_I2C_MemRxCpltCallback(I2C_HandleTypeDef *hi2c)
-{
-    if (hi2c->Instance != I2C1) return;
-    MPU6050_ProcessRaw(&raw);
-    mpu_dma_done_count++;
-    mpu_dma_busy = 0;
-    if (controlTaskHandle != NULL) {
-        osThreadFlagsSet(controlTaskHandle, CONTROL_SAMPLE_FLAG);
-    }
-}
-
-void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *hi2c)
-{
-    if (hi2c->Instance != I2C1) return;
-    mpu_dma_err_count++;
-    mpu_dma_busy = 0;
-}
 /* USER CODE END 4 */
 
 /* USER CODE BEGIN Header_StartDefaultTask */
@@ -463,73 +413,13 @@ void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *hi2c)
 void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN 5 */
-    /* AM32 throttle sweep on PC0 (TIM1_CH1). Probe DC on multimeter:
-       1000us -> ~165 mV, 1500us -> ~247 mV, 2000us -> ~330 mV */
-    uint32_t pwm_tick = 0;
-    uint32_t pulse_us = 1000;
-
+    /* Heartbeat */
     for (;;)
     {
         HAL_GPIO_TogglePin(LED2_GPIO_PORT, LED2_PIN);
-
-        /* 10 ms/tick throttle sequence */
-        if      (pwm_tick < 300)  pulse_us = 1000;
-        else if (pwm_tick < 900)  pulse_us = 1750;
-        else if (pwm_tick < 1200) pulse_us = 1000;
-        if (++pwm_tick >= 1200) pwm_tick = 0;
-        __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, pulse_us);
-
-        osDelay(10);
+        osDelay(500);
     }
   /* USER CODE END 5 */
-}
-
-/* USER CODE BEGIN Header_StartControlTask */
-/**
-  * @brief  Runs complementary filter + motor control, paced by MPU6050 DRDY.
-  * @param  argument: Not used
-  * @retval None
-  */
-/* USER CODE END Header_StartControlTask */
-
-/* Complementary filter: alpha=0.98 -> tau ~= 49ms at 1kHz sample rate */
-#define COMP_ALPHA       0.98f
-#define COMP_DT_S        0.001f
-#define GYRO_LSB_PER_DPS 65.5f      /* ±500 dps FS -> 32768/500 */
-#define RAD_TO_DEG       57.29578f
-
-float pitch_deg = 0.0f;             /* filter output, exposed for SWD plot */
-float pitch_acc_deg = 0.0f;         /* raw accel-only pitch, for comparison */
-
-void StartControlTask(void *argument)
-{
-    /* Arm DRDY only now that the task is alive to consume flags */
-    MPU6050_EnableInterrupt(&hi2c1);
-
-    for (;;)
-    {
-        /* Block until DMA callback hands us a fresh sample (1 kHz) */
-        osThreadFlagsWait(CONTROL_SAMPLE_FLAG, osFlagsWaitAny, osWaitForever);
-
-        /* Snapshot raw under IRQ lock — next DMA completion can overwrite it */
-        MPU6050_RawDataTypeDef snap;
-        __disable_irq();
-        snap = raw;
-        __enable_irq();
-
-        float ax = (float)snap.accel.x;
-        float ay = (float)snap.accel.y;
-        float az = (float)snap.accel.z;
-        float gy_dps = -(float)snap.gyro.y / GYRO_LSB_PER_DPS;
-
-        /* Pitch from gravity: below horizon positive, above negative (sign flipped for rig) */
-        pitch_acc_deg = atan2f(ax, sqrtf(ay*ay + az*az)) * RAD_TO_DEG;
-
-        pitch_deg = COMP_ALPHA * (pitch_deg + gy_dps * COMP_DT_S)
-                  + (1.0f - COMP_ALPHA) * pitch_acc_deg;
-
-        /* TODO: pitch -> motor command */
-    }
 }
 
 /**

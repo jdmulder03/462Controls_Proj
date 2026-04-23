@@ -415,6 +415,7 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "matplotlib" },
+    { name = "numpy" },
     { name = "pyelftools" },
     { name = "pyocd" },
 ]
@@ -422,6 +423,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "matplotlib", specifier = ">=3.10.8" },
+    { name = "numpy", specifier = ">=2.4.4" },
     { name = "pyelftools", specifier = ">=0.32" },
     { name = "pyocd", specifier = ">=0.44.0" },
 ]
